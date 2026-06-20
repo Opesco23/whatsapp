@@ -1,0 +1,23 @@
+name: Quiz CI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      HANDLE: ${{ secrets.HANDLE }}
+      CODE: ${{ secrets.CODE }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Install dependencies
+        run: npm install
+      - name: Run quiz file
+        run: |
+          node quiz2.js || true
