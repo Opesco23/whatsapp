@@ -7,7 +7,6 @@ const BEASTS = ['Sybil', 'Rune', 'Goliath'];
 
 // --- TIMEOUT SETTINGS ---
 const FETCH_TIMEOUT = 15000; // 15 second timeout for fetch requests
-const BATTLE_CHECK_INTERVAL = 2000; // Check battle status every 2 seconds
 const MAX_BATTLE_DURATION = 300000; // 5 minute max per battle (safety cutoff)
 
 // Helper function to create a delay
@@ -39,9 +38,10 @@ const client = new Client({
 });
 
 let otakuGroup = null;
-let activeBattles = []; // List of active battle promises
-let activeCombos = new Set(); // Track which opponent:beast combos are currently fighting
-let battleInProgress = false; // Flag to ensure battles complete
+let activeBattles = new Map(); // Maps battleId → { promise, combo }
+let activeCombos = new Set(); // Set of comboKeys currently in battle
+let pendingCombos = new Map(); // Maps timestamp → combo (for quick lookup)
+let battleIdCounter = 0; // To generate unique battle IDs
 
 client.on('qr', (qr) => {
     qrcode.generate(qr, { small: true });
@@ -52,7 +52,7 @@ client.on('ready', async () => {
     console.log(`\n🔧 SETUP:`);
     console.log(`   Opponents: ${OPPONENT_IDS.length} | Beasts: ${BEASTS.length}`);
     console.log(`   Total combos: ${OPPONENT_IDS.length * BEASTS.length}`);
-    console.log(`   ✓ Running battle system with proper completion tracking\n`);
+    console.log(`   ✓ Running battle system with proper combo tracking\n`);
 
     try {
         await sleep(3000);
@@ -70,40 +70,64 @@ client.on('ready', async () => {
     }
 });
 
+// Track which combo we just sent (with timestamp to avoid race conditions)
+let lastSentCombo = null;
+let lastSentTime = null;
+
 client.on('message', async (msg) => {
     if (msg.body.includes('Challenger:') && msg.body.includes('Defender:')) {
 
         const challengerMatch = msg.body.match(/Challenger:\s*(https:\/\/quizmd\.online\/battle\/[^\s]+)/);
         const defenderMatch = msg.body.match(/Defender:\s*(https:\/\/quizmd\.online\/battle\/[^\s]+)/);
 
-        if (challengerMatch && defenderMatch) {
+        if (challengerMatch && defenderMatch && lastSentCombo && lastSentTime) {
             const challengerUrl = challengerMatch[1];
             const defenderUrl = defenderMatch[1];
 
-            console.log(`\n[BATTLE START] Battle captured! Active battles: ${activeBattles.length}`);
+            // Use the combo that was just sent
+            const combo = lastSentCombo;
+            const timeDiff = Date.now() - lastSentTime;
+
+            // INCREASED TOLERANCE: Allow up to 15 seconds for the message to arrive
+            if (timeDiff > 15000) {
+                console.log(`[WARNING] Message arrived ${timeDiff}ms after challenge - might be stale, skipping`);
+                return;
+            }
+
+            const battleId = ++battleIdCounter;
+
+            console.log(`\n[BATTLE START] Battle #${battleId} captured for combo: ${combo.comboKey}`);
+            console.log(`               Time since challenge: ${timeDiff}ms`);
+            console.log(`               Active battles: ${activeBattles.size}`);
 
             // Create battle promise that MUST complete before marking done
-            const battlePromise = executeBattle(challengerUrl, defenderUrl)
-                .then(() => {
-                    console.log(`[BATTLE END] ✓ Battle completed successfully`);
-                })
-                .catch((err) => {
-                    console.error(`[BATTLE ERROR] Battle failed:`, err.message);
-                })
-                .finally(() => {
-                    // Remove from active battles
-                    activeBattles = activeBattles.filter(b => b !== battlePromise);
-                    
-                    // Release the combo
-                    if (activeCombos.size > 0) {
-                        console.log(`[CLEANUP] Released combos. Remaining active: ${activeCombos.size}`);
-                    }
-                    
-                    console.log(`[STATUS] Active battles remaining: ${activeBattles.length}`);
-                });
+            const battlePromise = executeBattle(battleId, challengerUrl, defenderUrl)
+            .then(() => {
+                console.log(`[BATTLE END] Battle #${battleId} ✓ Completed successfully`);
+            })
+            .catch((err) => {
+                console.error(`[BATTLE ERROR] Battle #${battleId} failed:`, err.message);
+            })
+            .finally(() => {
+                // CLEANUP: Release this specific combo
+                if (activeCombos.has(combo.comboKey)) {
+                    activeCombos.delete(combo.comboKey);
+                    const totalCombos = OPPONENT_IDS.length * BEASTS.length;
+                    console.log(`[CLEANUP] Released combo: ${combo.comboKey} | Remaining: ${activeCombos.size}/${totalCombos}`);
+                }
 
-            activeBattles.push(battlePromise);
-            console.log(`[TRACKING] Total concurrent battles: ${activeBattles.length}`);
+                // Remove battle from active
+                activeBattles.delete(battleId);
+                console.log(`[STATUS] Active battles remaining: ${activeBattles.size}`);
+            });
+
+            // Track this battle
+            activeBattles.set(battleId, { promise: battlePromise, combo: combo.comboKey });
+            console.log(`[TRACKING] Total concurrent battles: ${activeBattles.size}`);
+
+            // Clear the last sent combo
+            lastSentCombo = null;
+            lastSentTime = null;
         }
     }
 });
@@ -111,43 +135,43 @@ client.on('message', async (msg) => {
 /**
  * Execute a single battle from start to finish - MUST COMPLETE
  */
-async function executeBattle(challengerUrl, defenderUrl) {
-    console.log('[EXEC] Initializing Lobby Setup...');
+async function executeBattle(battleId, challengerUrl, defenderUrl) {
+    console.log(`[EXEC] [Battle #${battleId}] Initializing Lobby Setup...`);
     const battleStartTime = Date.now();
 
     try {
         // STEP 1: Ready up both players
-        console.log('[EXEC] [STEP 1/3] Readying up players...');
+        console.log(`[EXEC] [Battle #${battleId}] [STEP 1/3] Readying up players...`);
         const [challengerReady, defenderReady] = await Promise.all([
-            readyUpPlayer(challengerUrl, 'Challenger'),
-            readyUpPlayer(defenderUrl, 'Defender')
+            readyUpPlayer(challengerUrl, 'Challenger', battleId),
+                                                                   readyUpPlayer(defenderUrl, 'Defender', battleId)
         ]);
 
         if (!challengerReady || !defenderReady) {
             throw new Error('Failed to ready up both players');
         }
 
-        console.log('[EXEC] ✓ Both players Ready!');
+        console.log(`[EXEC] [Battle #${battleId}] ✓ Both players Ready!`);
         await sleep(500);
 
         // STEP 2: Run both strike loops concurrently
-        console.log('[EXEC] [STEP 2/3] Battle in progress...');
+        console.log(`[EXEC] [Battle #${battleId}] [STEP 2/3] Battle in progress...`);
         await Promise.all([
-            startStrikeLoop(challengerUrl, 'Challenger'),
-            startStrikeLoop(defenderUrl, 'Defender')
+            startStrikeLoop(challengerUrl, 'Challenger', battleId),
+                          startStrikeLoop(defenderUrl, 'Defender', battleId)
         ]);
 
         const battleDuration = ((Date.now() - battleStartTime) / 1000).toFixed(1);
-        console.log(`[EXEC] [STEP 3/3] ✓ Battle Concluded! (Duration: ${battleDuration}s)`);
+        console.log(`[EXEC] [Battle #${battleId}] [STEP 3/3] ✓ Battle Concluded! (Duration: ${battleDuration}s)`);
 
     } catch (err) {
         const battleDuration = ((Date.now() - battleStartTime) / 1000).toFixed(1);
-        console.error(`[EXEC] ❌ Error during battle sequence (${battleDuration}s):`, err.message);
+        console.error(`[EXEC] [Battle #${battleId}] ❌ Error (${battleDuration}s):`, err.message);
         throw err;
     }
 
     // CRITICAL: Rest AFTER battle is fully done
-    console.log('[EXEC] Resting 5s before next battle...');
+    console.log(`[EXEC] [Battle #${battleId}] Resting 5s before next battle...`);
     await sleep(5000);
 }
 
@@ -156,6 +180,7 @@ async function executeBattle(challengerUrl, defenderUrl) {
  */
 function getAvailableCombos() {
     const available = [];
+
     for (const opponentId of OPPONENT_IDS) {
         for (const beast of BEASTS) {
             const comboKey = `${opponentId}:${beast}`;
@@ -172,6 +197,7 @@ function getAvailableCombos() {
  */
 async function challengeLoop() {
     let challengeCount = 0;
+    const totalCombos = OPPONENT_IDS.length * BEASTS.length;
 
     while (true) {
         try {
@@ -179,31 +205,45 @@ async function challengeLoop() {
 
             if (available.length === 0) {
                 // All combos are fighting - wait
-                console.log(`[QUEUE] All ${OPPONENT_IDS.length * BEASTS.length} combos in battle. Waiting...`);
+                console.log(`[QUEUE] All ${totalCombos} combos in battle. Waiting... (${activeCombos.size}/${totalCombos})`);
                 await sleep(3000);
                 continue;
             }
 
             // Pick random available combo
             const combo = available[Math.floor(Math.random() * available.length)];
-            
+
             // Mark as active BEFORE sending challenge
             activeCombos.add(combo.comboKey);
             challengeCount++;
 
+            // --- RECOVERY FAILSAFE ---
+            // If the battle link isn't captured within 15 seconds, release the combo from the queue
+            setTimeout(() => {
+                const isFighting = Array.from(activeBattles.values()).some(b => b.combo === combo.comboKey);
+                if (!isFighting && activeCombos.has(combo.comboKey)) {
+                    console.log(`[RECOVERY] Missed battle link for ${combo.comboKey}. Releasing back to pool.`);
+                    activeCombos.delete(combo.comboKey);
+                }
+            }, 15000);
+            // -------------------------
+
+            // Store this combo as "just sent" for message handler to link
+            lastSentCombo = combo;
+            lastSentTime = Date.now();
+
             // Send challenge with typing indicator
             await otakuGroup.sendStateTyping();
             await sleep(1500);
-            
+
             const challengeCommand = `.beast challenge ${combo.opponentId} ${combo.beast}`;
             await otakuGroup.sendMessage(challengeCommand);
-            
-            const totalCombos = OPPONENT_IDS.length * BEASTS.length;
+
             console.log(`[SEND] Challenge #${challengeCount}: ${challengeCommand}`);
-            console.log(`       [Queue: ${activeCombos.size}/${totalCombos} | Battles: ${activeBattles.length}]`);
-            
+            console.log(`       [Queue: ${activeCombos.size}/${totalCombos} | Battles: ${activeBattles.size}]`);
+
             await otakuGroup.clearState();
-            
+
             // Wait before next challenge
             await sleep(3000);
 
@@ -214,7 +254,7 @@ async function challengeLoop() {
     }
 }
 
-async function readyUpPlayer(webUrl, role) {
+async function readyUpPlayer(webUrl, role, battleId) {
     const apiUrl = webUrl.replace('https://quizmd.online/battle/', 'https://quizmd.online/api/battle/');
     const headers = {
         'Content-Type': 'application/json',
@@ -223,13 +263,13 @@ async function readyUpPlayer(webUrl, role) {
         'Accept': 'application/json'
     };
 
-    console.log(`[READY] [${role}] Starting setup...`);
+    console.log(`[READY] [Battle #${battleId}] [${role}] Starting setup...`);
 
     try {
         if (role === 'Defender') {
-            console.log(`[READY] [${role}] Fetching available beasts...`);
-            
-            const beastsRes = await fetchWithTimeout(`${apiUrl}/beasts`, { 
+            console.log(`[READY] [Battle #${battleId}] [${role}] Fetching available beasts...`);
+
+            const beastsRes = await fetchWithTimeout(`${apiUrl}/beasts`, {
                 headers,
                 method: 'GET'
             });
@@ -245,7 +285,7 @@ async function readyUpPlayer(webUrl, role) {
                 const randomBeast = beastsData.beasts[randomIndex];
                 const selectedBeastId = randomBeast.cardId;
 
-                console.log(`[READY] [${role}] Selecting beast: ${randomBeast.name} (${selectedBeastId})`);
+                console.log(`[READY] [Battle #${battleId}] [${role}] Selecting beast: ${randomBeast.name} (${selectedBeastId})`);
 
                 const selectRes = await fetchWithTimeout(`${apiUrl}/select-beast`, {
                     method: 'POST',
@@ -257,14 +297,14 @@ async function readyUpPlayer(webUrl, role) {
                     throw new Error(`Failed to select beast - Status ${selectRes.status}`);
                 }
 
-                console.log(`[READY] [${role}] ✓ Beast locked in`);
+                console.log(`[READY] [Battle #${battleId}] [${role}] ✓ Beast locked in`);
             } else {
                 throw new Error('No beasts found in defender deck');
             }
         }
 
         // Ready up
-        console.log(`[READY] [${role}] Sending ready signal...`);
+        console.log(`[READY] [Battle #${battleId}] [${role}] Sending ready signal...`);
         const readyRes = await fetchWithTimeout(`${apiUrl}/ready`, {
             method: 'POST',
             headers: headers,
@@ -275,16 +315,16 @@ async function readyUpPlayer(webUrl, role) {
             throw new Error(`Failed to ready up - Status ${readyRes.status}`);
         }
 
-        console.log(`[READY] [${role}] ✓ Successfully readied up`);
+        console.log(`[READY] [Battle #${battleId}] [${role}] ✓ Successfully readied up`);
         return true;
 
     } catch (error) {
-        console.error(`[READY] [${role}] ❌ Setup failed:`, error.message);
+        console.error(`[READY] [Battle #${battleId}] [${role}] ❌ Setup failed:`, error.message);
         return false;
     }
 }
 
-async function startStrikeLoop(webUrl, role) {
+async function startStrikeLoop(webUrl, role, battleId) {
     const apiUrl = webUrl.replace('https://quizmd.online/battle/', 'https://quizmd.online/api/battle/');
     const headers = {
         'Content-Type': 'application/json',
@@ -296,13 +336,13 @@ async function startStrikeLoop(webUrl, role) {
     let strikeCount = 0;
     const strikeStartTime = Date.now();
 
-    console.log(`[STRIKE] [${role}] Strike loop started`);
+    console.log(`[STRIKE] [Battle #${battleId}] [${role}] Strike loop started`);
 
     while (true) {
         try {
             // Safety: Don't let battle run forever
             if (Date.now() - strikeStartTime > MAX_BATTLE_DURATION) {
-                console.log(`[STRIKE] [${role}] ⚠️  Max battle duration exceeded. Stopping.`);
+                console.log(`[STRIKE] [Battle #${battleId}] [${role}] ⚠️  Max battle duration exceeded. Stopping.`);
                 break;
             }
 
@@ -313,30 +353,30 @@ async function startStrikeLoop(webUrl, role) {
             });
 
             if (!actionResponse.ok) {
-                console.log(`[STRIKE] [${role}] Server rejected strike (Status ${actionResponse.status})`);
+                console.log(`[STRIKE] [Battle #${battleId}] [${role}] Server rejected strike (Status ${actionResponse.status})`);
                 break;
             }
 
             const data = await actionResponse.json();
 
             if (data.error || (data.status && data.status === 'error')) {
-                console.log(`[STRIKE] [${role}] Battle ended: ${data.error || 'Game finished'}`);
+                console.log(`[STRIKE] [Battle #${battleId}] [${role}] Battle ended: ${data.error || 'Game finished'}`);
                 break;
             }
 
             strikeCount++;
-            console.log(`[STRIKE] [${role}] Strike #${strikeCount} ✓`);
+            console.log(`[STRIKE] [Battle #${battleId}] [${role}] Strike #${strikeCount} ✓`);
 
             await sleep(1500);
 
         } catch (error) {
-            console.error(`[STRIKE] [${role}] ❌ Error:`, error.message);
+            console.error(`[STRIKE] [Battle #${battleId}] [${role}] ❌ Error:`, error.message);
             break;
         }
     }
 
     const strikeDuration = ((Date.now() - strikeStartTime) / 1000).toFixed(1);
-    console.log(`[STRIKE] [${role}] Loop ended after ${strikeCount} strikes (${strikeDuration}s)`);
+    console.log(`[STRIKE] [Battle #${battleId}] [${role}] Loop ended after ${strikeCount} strikes (${strikeDuration}s)`);
 }
 
 client.initialize();
