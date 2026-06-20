@@ -10,9 +10,11 @@ const BEASTS = ['Sybil', 'Rune'];
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const client = new Client({
-    authStrategy: new LocalAuth()
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
 });
-
 let otakuGroup = null; // We will store the group here so we can access it anywhere
 let isBattling = false; // Flag to prevent multiple battles from running over each other
 

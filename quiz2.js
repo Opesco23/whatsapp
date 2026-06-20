@@ -12,7 +12,7 @@ const groq = new Groq({
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox'] // Helps prevent crashing on some environments
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
 });
 

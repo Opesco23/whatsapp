@@ -34,9 +34,11 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT) {
 }
 
 const client = new Client({
-    authStrategy: new LocalAuth()
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
 });
-
 let otakuGroup = null;
 let activeBattles = new Map(); // Maps battleId → { promise, combo }
 let activeCombos = new Set(); // Set of comboKeys currently in battle
