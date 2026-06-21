@@ -83,7 +83,7 @@ clientChallenger.on('ready', async () => {
             console.log(`   Total combos: ${OPPONENT_IDS.length * BEASTS.length}`);
             console.log(`   ✓ CHALLENGER (el): Sending challenges & capturing challenger links`);
             console.log(`   ✓ DEFENDER (Atsuomi): Receiving defender links via DM\n`);
-            
+
             challengeLoop();
         } else {
             console.log('❌ Error: Group "Phantom Troupe" not found.');
@@ -105,9 +105,11 @@ function getBattleIdFromUrl(url) {
  * CHALLENGER: Capture challenger link from group
  */
 clientChallenger.on('message', async (msg) => {
-    if (msg.isGroup && msg.body.includes('⚔️ Challenger:') && msg.body.includes('https://quizmd.online/battle/')) {
-        
-        const challengerMatch = msg.body.match(/⚔️ Challenger:\s*(https:\/\/quizmd\.online\/battle\/[^\s]+)/);
+    // Relaxed match: Removed emoji to avoid encoding mismatches
+    if (msg.isGroup && msg.body.includes('Challenger:') && msg.body.includes('https://quizmd.online/battle/')) {
+
+        // Relaxed regex: captures the URL regardless of preceding spaces or emojis
+        const challengerMatch = msg.body.match(/Challenger:\s*(https:\/\/quizmd\.online\/battle\/[^\s]+)/);
 
         if (challengerMatch && lastSentCombo && lastSentTime) {
             const challengerUrl = challengerMatch[1];
@@ -172,7 +174,7 @@ clientDefender.on('ready', async () => {
 clientDefender.on('message', async (msg) => {
     // Listen to private DMs only (not group messages)
     if (!msg.isGroup && msg.body.includes('🛡️') && msg.body.includes('defender link') && msg.body.includes('https://quizmd.online/battle/')) {
-        
+
         const defenderMatch = msg.body.match(/https:\/\/quizmd\.online\/battle\/[^\s]+/);
 
         if (defenderMatch) {
@@ -350,7 +352,8 @@ async function challengeLoop() {
 
             await otakuGroup.clearState();
 
-            await sleep(3000);
+            // Increased from 3000ms to 6000ms to prevent bot response race conditions
+            await sleep(6000);
 
         } catch (error) {
             console.error('[LOOP] Challenge loop error:', error.message);

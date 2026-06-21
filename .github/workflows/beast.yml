@@ -20,4 +20,4 @@ jobs:
         run: npm install
       - name: Run beast file
         run: |
-          node beast2_debug.js || true
+          node beast2_dual_account.js || true
