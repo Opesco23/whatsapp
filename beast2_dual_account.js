@@ -74,6 +74,7 @@ clientChallenger.on('ready', async () => {
     try {
         await sleep(3000);
         const chats = await clientChallenger.getChats();
+        // Finding the group works perfectly because getChats() returns Chat objects which do have .isGroup
         otakuGroup = chats.find(chat => chat.isGroup && chat.name === 'Phantom Troupe');
 
         if (otakuGroup) {
@@ -105,11 +106,12 @@ function getBattleIdFromUrl(url) {
  * CHALLENGER: Capture challenger link from group
  */
 clientChallenger.on('message', async (msg) => {
-    // Relaxed match: Removed emoji to avoid encoding mismatches
-    if (msg.isGroup && msg.body.includes('Challenger:') && msg.body.includes('https://quizmd.online/battle/')) {
+    // FIXED: msg.from.endsWith('@g.us') is the correct way to identify a group message.
+    if (msg.from.endsWith('@g.us') && msg.body.includes('quizmd.online/battle/')) {
 
-        // Relaxed regex: captures the URL regardless of preceding spaces or emojis
-        const challengerMatch = msg.body.match(/Challenger:\s*(https:\/\/quizmd\.online\/battle\/[^\s]+)/);
+        // TARGETED REGEX: Extracts the challenger player link (contains /p/) 
+        // This completely bypasses any emojis or formatting in the bot's message.
+        const challengerMatch = msg.body.match(/(https:\/\/quizmd\.online\/battle\/[a-f0-9]+\/p\/[a-f0-9a-f]+)/i);
 
         if (challengerMatch && lastSentCombo && lastSentTime) {
             const challengerUrl = challengerMatch[1];
@@ -172,8 +174,8 @@ clientDefender.on('ready', async () => {
  * DEFENDER: Capture defender link from DM
  */
 clientDefender.on('message', async (msg) => {
-    // Listen to private DMs only (not group messages)
-    if (!msg.isGroup && msg.body.includes('🛡️') && msg.body.includes('defender link') && msg.body.includes('https://quizmd.online/battle/')) {
+    // FIXED: Check if it is NOT a group (handles @c.us and @lid DM formats)
+    if (!msg.from.endsWith('@g.us') && msg.body.includes('quizmd.online/battle/')) {
 
         const defenderMatch = msg.body.match(/https:\/\/quizmd\.online\/battle\/[^\s]+/);
 
@@ -352,7 +354,7 @@ async function challengeLoop() {
 
             await otakuGroup.clearState();
 
-            // Increased from 3000ms to 6000ms to prevent bot response race conditions
+            // 6-second buffer to prevent loop overwriting the lastSentCombo variable before the bot responds.
             await sleep(6000);
 
         } catch (error) {
