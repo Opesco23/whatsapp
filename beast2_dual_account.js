@@ -1,14 +1,14 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 
-// --- CONFIGURATION LISTS ---
+// --- CONFIGURATION ---
 const OPPONENT_IDS = ['BM-KXU7QZ'];
-const BEASTS = ['Sybil', 'Vlad', 'Camazotz'];
+const BEASTS = ['Aurelian', 'Eclipse', 'Regulus'];
 
 // --- TIMEOUT SETTINGS ---
 const FETCH_TIMEOUT = 15000;
 const MAX_BATTLE_DURATION = 300000;
-const LINK_PAIR_TIMEOUT = 40000; // 40 seconds to allow defender link to arrive
+const LINK_PAIR_TIMEOUT = 25000; // Time to wait for paired link
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -17,10 +17,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT) {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-        const response = await fetch(url, {
-            ...options,
-            signal: controller.signal
-        });
+        const response = await fetch(url, { ...options, signal: controller.signal });
         clearTimeout(timeout);
         return response;
     } catch (error) {
@@ -33,38 +30,61 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT) {
 }
 
 // ============================================
-// CLIENT 1: CHALLENGER (el)
+// DUAL CLIENT SETUP
 // ============================================
 const clientChallenger = new Client({
     authStrategy: new LocalAuth({ clientId: 'challenger' }),
-    puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-    }
+    puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'] }
 });
 
-// ============================================
-// CLIENT 2: DEFENDER (Atsuomi)
-// ============================================
 const clientDefender = new Client({
     authStrategy: new LocalAuth({ clientId: 'defender' }),
-    puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-    }
+    puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'] }
 });
 
+// ============================================
+// SHARED STATE
+// ============================================
 let otakuGroup = null;
 let activeBattles = new Map();
 let activeCombos = new Set();
 let battleIdCounter = 0;
 
-let pendingChallengerLinks = new Map();
-let pendingDefenderLinks = new Map();
+// Link pairing - UNIFIED STRUCTURE
+// battleId -> { challengerUrl, defenderUrl, combo, timestamp, hasChallenger, hasDefender }
+let pendingBattles = new Map();
+
+// Challenge tracking
+let lastSentCombo = null;
+let lastSentTime = null;
 
 // ============================================
-// CHALLENGER CLIENT SETUP
+// UTILITY FUNCTIONS
+// ============================================
+function getBattleIdFromUrl(url) {
+    const match = url.match(/\/battle\/([a-f0-9]+)/);
+    return match ? match[1] : null;
+}
+
+function extractBattleUrl(text) {
+    // Extract first battle URL found
+    const urlPattern = /https:\/\/quizmd\.online\/battle\/[a-f0-9]+\/[^\/]+\/[a-f0-9a-z]+/;
+    const match = text.match(urlPattern);
+    return match ? match[0] : null;
+}
+
+function getChallengerIdFromDM(text) {
+    // Extract challenger ID from DM message
+    // Pattern: "el challenged you" or similar
+    const match = text.match(/\*([^*]+)\*\s+challenged you/);
+    return match ? match[1] : null;
+}
+
+// ============================================
+// CHALLENGER CLIENT (el) - SENDS CHALLENGES
 // ============================================
 clientChallenger.on('qr', (qr) => {
-    console.log('\n[CHALLENGER QR] Scan this to log in as el:');
+    console.log('\n[CHALLENGER QR] Scan to login as el (Challenger):');
     qrcode.generate(qr, { small: true });
 });
 
@@ -82,8 +102,8 @@ clientChallenger.on('ready', async () => {
             console.log(`   Opponents: ${OPPONENT_IDS.length} | Beasts: ${BEASTS.length}`);
             console.log(`   Total combos: ${OPPONENT_IDS.length * BEASTS.length}`);
             console.log(`   Link pair timeout: ${LINK_PAIR_TIMEOUT / 1000}s`);
-            console.log(`   ✓ CHALLENGER (el): Sending challenges & capturing challenger links`);
-            console.log(`   ✓ DEFENDER (Atsuomi): Receiving defender links via DM\n`);
+            console.log(`   ✓ Challenger link from GROUP`);
+            console.log(`   ✓ Defender link from DM\n`);
 
             challengeLoop();
         } else {
@@ -94,71 +114,71 @@ clientChallenger.on('ready', async () => {
     }
 });
 
-let lastSentCombo = null;
-let lastSentTime = null;
-
-function getBattleIdFromUrl(url) {
-    const match = url.match(/\/battle\/([a-f0-9]+)\//);
-    return match ? match[1] : null;
-}
-
 /**
- * CHALLENGER: Capture challenger link from group
+ * CHALLENGER: Capture challenger link from group message
  */
 clientChallenger.on('message', async (msg) => {
-    if (msg.isGroup && msg.body.includes('⚔️') && msg.body.includes('Challenger:') && msg.body.includes('https://quizmd.online/battle/')) {
-
-        const challengerMatch = msg.body.match(/Challenger:\s*(https:\/\/quizmd\.online\/battle\/[^\s\n]+)/);
-
-        if (challengerMatch && lastSentCombo && lastSentTime) {
-            const challengerUrl = challengerMatch[1];
-            const timeDiff = Date.now() - lastSentTime;
-            const battleId = getBattleIdFromUrl(challengerUrl);
-
-            if (timeDiff > LINK_PAIR_TIMEOUT) {
-                console.log(`[WARNING] Challenger link arrived ${timeDiff}ms after challenge - might be stale, skipping`);
-                return;
-            }
-
-            const combo = lastSentCombo;
-
-            console.log(`\n[CHALLENGER] ✓ Captured challenger link for Battle: ${battleId}`);
-            console.log(`             Combo: ${combo.comboKey}`);
-            console.log(`             Time since challenge: ${timeDiff}ms`);
-
-            pendingChallengerLinks.set(battleId, {
-                challengerUrl,
-                combo,
-                timestamp: Date.now()
-            });
-
-            // Cleanup timeout
-            setTimeout(() => {
-                if (pendingChallengerLinks.has(battleId) && !pendingDefenderLinks.has(battleId)) {
-                    console.log(`[TIMEOUT] No defender link for Battle ${battleId}. Releasing combo.`);
-                    const c = pendingChallengerLinks.get(battleId);
-                    if (c && activeCombos.has(c.combo.comboKey)) {
-                        activeCombos.delete(c.combo.comboKey);
-                    }
-                    pendingChallengerLinks.delete(battleId);
-                }
-            }, LINK_PAIR_TIMEOUT);
-
-            console.log(`[QUEUE] Waiting for defender link via DM... (Pending: ${pendingChallengerLinks.size})`);
-
-            tryPairLinks(battleId);
-
-            lastSentCombo = null;
-            lastSentTime = null;
-        }
+    // Only process group messages with battle links
+    if (!msg.from.endsWith('@g.us') || !msg.body.includes('quizmd.online/battle/')) {
+        return;
     }
+
+    // Look for "Challenger:" line in group message
+    if (!msg.body.includes('Challenger:')) {
+        return;
+    }
+
+    const challengerUrl = extractBattleUrl(msg.body.split('Challenger:')[1]);
+
+    if (!challengerUrl || !lastSentCombo || !lastSentTime) {
+        return;
+    }
+
+    const battleId = getBattleIdFromUrl(challengerUrl);
+    if (!battleId) return;
+
+    const timeDiff = Date.now() - lastSentTime;
+
+    // TOLERANCE: Allow 15 seconds for message to arrive
+    if (timeDiff > LINK_PAIR_TIMEOUT) {
+        console.log(`[WARNING] Challenger link arrived ${timeDiff}ms after challenge - stale, skipping`);
+        return;
+    }
+
+    // Initialize battle entry
+    if (!pendingBattles.has(battleId)) {
+        pendingBattles.set(battleId, {
+            challengerUrl: null,
+            defenderUrl: null,
+            combo: null,
+            timestamp: Date.now(),
+            hasChallenger: false,
+            hasDefender: false
+        });
+    }
+
+    const battle = pendingBattles.get(battleId);
+    battle.challengerUrl = challengerUrl;
+    battle.hasChallenger = true;
+    battle.combo = lastSentCombo;
+    battle.timestamp = Date.now();
+
+    console.log(`\n[CHALLENGER] ✓ Captured from GROUP for Battle: ${battleId}`);
+    console.log(`             Combo: ${lastSentCombo.comboKey}`);
+    console.log(`             Time since challenge: ${timeDiff}ms`);
+    console.log(`             Waiting for defender link from DM...`);
+
+    lastSentCombo = null;
+    lastSentTime = null;
+
+    tryStartBattle(battleId);
 });
 
 // ============================================
-// DEFENDER CLIENT SETUP
+// DEFENDER CLIENT (Atsuomi) - CAPTURES DM LINK
 // ============================================
 clientDefender.on('qr', (qr) => {
-    console.log('\n[DEFENDER QR] Scan this to log in as Atsuomi:');
+    console.log('\n[DEFENDER QR] Scan to login as Atsuomi (Defender):');
     qrcode.generate(qr, { small: true });
 });
 
@@ -169,98 +189,131 @@ clientDefender.on('ready', async () => {
 
 /**
  * DEFENDER: Capture defender link from DM
+ * Bot sends: "el challenged you to a Beast Battle! Open your private defender link..."
+ * Format: "https://quizmd.online/battle/ID/p/HASH" (defender gets a challenger-style URL)
  */
 clientDefender.on('message', async (msg) => {
-    if (!msg.isGroup && msg.body.includes('🛡️') && msg.body.includes('defender link') && msg.body.includes('https://quizmd.online/battle/')) {
-
-        const defenderMatch = msg.body.match(/https:\/\/quizmd\.online\/battle\/[^\s\n]+/);
-
-        if (defenderMatch) {
-            const defenderUrl = defenderMatch[0];
-            const battleId = getBattleIdFromUrl(defenderUrl);
-
-            console.log(`\n[DEFENDER] ✓ Captured defender link for Battle: ${battleId}`);
-            console.log(`           From DM: ${msg.from}`);
-
-            pendingDefenderLinks.set(battleId, {
-                defenderUrl,
-                timestamp: Date.now()
-            });
-
-            // Cleanup timeout
-            setTimeout(() => {
-                if (pendingDefenderLinks.has(battleId) && !pendingChallengerLinks.has(battleId)) {
-                    console.log(`[TIMEOUT] No challenger link for Battle ${battleId}. Orphaned defender link.`);
-                    pendingDefenderLinks.delete(battleId);
-                }
-            }, LINK_PAIR_TIMEOUT);
-
-            console.log(`[QUEUE] Waiting for challenger link from group... (Pending: ${pendingDefenderLinks.size})`);
-
-            tryPairLinks(battleId);
-        }
+    // Only process DMs (not group messages)
+    if (msg.from.endsWith('@g.us') || !msg.body.includes('challenged you')) {
+        return;
     }
+
+    // Check if this is a challenge notification
+    if (!msg.body.includes('quizmd.online/battle/')) {
+        return;
+    }
+
+    const defenderUrl = extractBattleUrl(msg.body);
+    if (!defenderUrl) return;
+
+    const battleId = getBattleIdFromUrl(defenderUrl);
+    if (!battleId) return;
+
+    // Extract challenger name from DM
+    const challengerName = getChallengerIdFromDM(msg.body);
+
+    // Initialize battle entry if needed
+    if (!pendingBattles.has(battleId)) {
+        pendingBattles.set(battleId, {
+            challengerUrl: null,
+            defenderUrl: null,
+            combo: null,
+            timestamp: Date.now(),
+            hasChallenger: false,
+            hasDefender: false
+        });
+    }
+
+    const battle = pendingBattles.get(battleId);
+
+    // Store defender URL
+    battle.defenderUrl = defenderUrl;
+    battle.hasDefender = true;
+
+    console.log(`\n[DEFENDER] ✓ Captured from DM for Battle: ${battleId}`);
+    console.log(`           Challenger: ${challengerName}`);
+    console.log(`           Time to receive: ${Date.now() - battle.timestamp}ms`);
+
+    if (battle.hasChallenger) {
+        console.log(`           ✓ Challenger link already present`);
+    } else {
+        console.log(`           Waiting for challenger link from group...`);
+    }
+
+    tryStartBattle(battleId);
 });
 
-/**
- * Try to pair challenger and defender links
- */
-function tryPairLinks(battleId) {
-    const challenger = pendingChallengerLinks.get(battleId);
-    const defender = pendingDefenderLinks.get(battleId);
+// ============================================
+// LINK PAIRING & BATTLE EXECUTION
+// ============================================
+function tryStartBattle(battleId) {
+    const battle = pendingBattles.get(battleId);
+    if (!battle) return;
 
-    if (challenger && defender) {
-        console.log(`\n[PAIR] ✓ Paired! Battle ${battleId} has both links`);
-        console.log(`       Challenger: ${challenger.combo.comboKey}`);
-        console.log(`       Time to pair: ${Date.now() - challenger.timestamp}ms`);
+    // Both links must be present AND combo must be set
+    if (battle.hasChallenger && battle.hasDefender && battle.combo) {
+        console.log(`\n[PAIR] ✓ Both links ready! Starting Battle #${battleId}`);
+        console.log(`       Combo: ${battle.combo.comboKey}`);
+        console.log(`       Time to pair: ${Date.now() - battle.timestamp}ms`);
 
-        pendingChallengerLinks.delete(battleId);
-        pendingDefenderLinks.delete(battleId);
+        pendingBattles.delete(battleId);
 
-        startBattle(battleId, challenger.challengerUrl, defender.defenderUrl, challenger.combo);
+        // Mark combo as fighting
+        activeCombos.add(battle.combo.comboKey);
+
+        // Execute the battle
+        const battlePromise = executeBattle(battleId, battle.challengerUrl, battle.defenderUrl)
+            .then(() => {
+                console.log(`[BATTLE END] Battle #${battleId} ✓ Completed successfully`);
+            })
+            .catch((err) => {
+                console.error(`[BATTLE ERROR] Battle #${battleId} failed:`, err.message);
+            })
+            .finally(() => {
+                // Release combo
+                if (activeCombos.has(battle.combo.comboKey)) {
+                    activeCombos.delete(battle.combo.comboKey);
+                    const totalCombos = OPPONENT_IDS.length * BEASTS.length;
+                    console.log(`[CLEANUP] Released combo: ${battle.combo.comboKey} | Remaining: ${activeCombos.size}/${totalCombos}`);
+                }
+
+                activeBattles.delete(battleId);
+                console.log(`[STATUS] Active battles remaining: ${activeBattles.size}`);
+            });
+
+        activeBattles.set(battleId, { promise: battlePromise, combo: battle.combo.comboKey });
+        console.log(`[TRACKING] Total concurrent battles: ${activeBattles.size}`);
+
+        return true;
     }
+
+    return false;
 }
 
-/**
- * Start battle after both links are paired
- */
-function startBattle(battleId, challengerUrl, defenderUrl, combo) {
-    const internalBattleId = ++battleIdCounter;
-
-    console.log(`[BATTLE START] Battle #${internalBattleId} (Game: ${battleId})`);
-    console.log(`               Combo: ${combo.comboKey}`);
-    console.log(`               Active battles: ${activeBattles.size}`);
-
-    const battlePromise = executeBattle(internalBattleId, challengerUrl, defenderUrl)
-        .then(() => {
-            console.log(`[BATTLE END] Battle #${internalBattleId} ✓ Completed successfully`);
-        })
-        .catch((err) => {
-            console.error(`[BATTLE ERROR] Battle #${internalBattleId} failed:`, err.message);
-        })
-        .finally(() => {
-            if (activeCombos.has(combo.comboKey)) {
-                activeCombos.delete(combo.comboKey);
-                const totalCombos = OPPONENT_IDS.length * BEASTS.length;
-                console.log(`[CLEANUP] Released combo: ${combo.comboKey} | Remaining: ${activeCombos.size}/${totalCombos}`);
+// Cleanup for stale battles
+setInterval(() => {
+    const now = Date.now();
+    for (const [battleId, battle] of pendingBattles.entries()) {
+        if (now - battle.timestamp > LINK_PAIR_TIMEOUT) {
+            console.log(`[TIMEOUT] Battle ${battleId} link pair timeout. Releasing combo.`);
+            if (battle.combo && activeCombos.has(battle.combo.comboKey)) {
+                activeCombos.delete(battle.combo.comboKey);
             }
+            pendingBattles.delete(battleId);
+        }
+    }
+}, 5000);
 
-            activeBattles.delete(internalBattleId);
-            console.log(`[STATUS] Active battles remaining: ${activeBattles.size}`);
-        });
-
-    activeBattles.set(internalBattleId, { promise: battlePromise, combo: combo.comboKey });
-}
-
-/**
- * Execute battle
- */
+// ============================================
+// BATTLE EXECUTION
+// ============================================
 async function executeBattle(battleId, challengerUrl, defenderUrl) {
-    console.log(`[EXEC] [Battle #${battleId}] Initializing Lobby Setup...`);
+    console.log(`[EXEC] [Battle #${battleId}] Initializing...`);
     const battleStartTime = Date.now();
 
     try {
-        console.log(`[EXEC] [Battle #${battleId}] [STEP 1/3] Readying up players...`);
+        // Ready up both players
+        console.log(`[EXEC] [Battle #${battleId}] [STEP 1/3] Readying players...`);
         const [challengerReady, defenderReady] = await Promise.all([
             readyUpPlayer(challengerUrl, 'Challenger', battleId),
             readyUpPlayer(defenderUrl, 'Defender', battleId)
@@ -270,9 +323,10 @@ async function executeBattle(battleId, challengerUrl, defenderUrl) {
             throw new Error('Failed to ready up both players');
         }
 
-        console.log(`[EXEC] [Battle #${battleId}] ✓ Both players Ready!`);
+        console.log(`[EXEC] [Battle #${battleId}] ✓ Both players ready!`);
         await sleep(500);
 
+        // Execute strike loops
         console.log(`[EXEC] [Battle #${battleId}] [STEP 2/3] Battle in progress...`);
         await Promise.all([
             startStrikeLoop(challengerUrl, 'Challenger', battleId),
@@ -288,13 +342,16 @@ async function executeBattle(battleId, challengerUrl, defenderUrl) {
         throw err;
     }
 
+    // Rest after battle
     console.log(`[EXEC] [Battle #${battleId}] Resting 5s before next battle...`);
     await sleep(5000);
 }
 
+// ============================================
+// CHALLENGE LOOP (CHALLENGER CLIENT)
+// ============================================
 function getAvailableCombos() {
     const available = [];
-
     for (const opponentId of OPPONENT_IDS) {
         for (const beast of BEASTS) {
             const comboKey = `${opponentId}:${beast}`;
@@ -306,9 +363,6 @@ function getAvailableCombos() {
     return available;
 }
 
-/**
- * Challenge loop - runs on CHALLENGER client
- */
 async function challengeLoop() {
     let challengeCount = 0;
     const totalCombos = OPPONENT_IDS.length * BEASTS.length;
@@ -325,13 +379,11 @@ async function challengeLoop() {
 
             const combo = available[Math.floor(Math.random() * available.length)];
 
-            activeCombos.add(combo.comboKey);
-            challengeCount++;
-
+            // Recovery failsafe - if battle link pair doesn't happen within timeout
             setTimeout(() => {
                 const isFighting = Array.from(activeBattles.values()).some(b => b.combo === combo.comboKey);
                 if (!isFighting && activeCombos.has(combo.comboKey)) {
-                    console.log(`[RECOVERY] Missed battle link pair for ${combo.comboKey}. Releasing back to pool.`);
+                    console.log(`[RECOVERY] Missed battle links for ${combo.comboKey}. Releasing back to pool.`);
                     activeCombos.delete(combo.comboKey);
                 }
             }, LINK_PAIR_TIMEOUT);
@@ -339,6 +391,9 @@ async function challengeLoop() {
             lastSentCombo = combo;
             lastSentTime = Date.now();
 
+            challengeCount++;
+
+            // Send challenge
             await otakuGroup.sendStateTyping();
             await sleep(1500);
 
@@ -349,7 +404,6 @@ async function challengeLoop() {
             console.log(`       [Queue: ${activeCombos.size}/${totalCombos} | Battles: ${activeBattles.size}]`);
 
             await otakuGroup.clearState();
-
             await sleep(3000);
 
         } catch (error) {
@@ -359,6 +413,9 @@ async function challengeLoop() {
     }
 }
 
+// ============================================
+// PLAYER READY & STRIKE LOOPS
+// ============================================
 async function readyUpPlayer(webUrl, role, battleId) {
     const apiUrl = webUrl.replace('https://quizmd.online/battle/', 'https://quizmd.online/api/battle/');
     const headers = {
@@ -374,44 +431,34 @@ async function readyUpPlayer(webUrl, role, battleId) {
         if (role === 'Defender') {
             console.log(`[READY] [Battle #${battleId}] [${role}] Fetching available beasts...`);
 
-            const beastsRes = await fetchWithTimeout(`${apiUrl}/beasts`, {
-                headers,
-                method: 'GET'
-            });
-
+            const beastsRes = await fetchWithTimeout(`${apiUrl}/beasts`, { headers, method: 'GET' });
             if (!beastsRes.ok) {
-                throw new Error(`API returned status ${beastsRes.status} when fetching beasts`);
+                throw new Error(`API returned status ${beastsRes.status}`);
             }
 
             const beastsData = await beastsRes.json();
-
             if (beastsData.beasts && beastsData.beasts.length > 0) {
-                const randomIndex = Math.floor(Math.random() * beastsData.beasts.length);
-                const randomBeast = beastsData.beasts[randomIndex];
-                const selectedBeastId = randomBeast.cardId;
-
-                console.log(`[READY] [Battle #${battleId}] [${role}] Selecting beast: ${randomBeast.name} (${selectedBeastId})`);
-
+                const randomBeast = beastsData.beasts[Math.floor(Math.random() * beastsData.beasts.length)];
                 const selectRes = await fetchWithTimeout(`${apiUrl}/select-beast`, {
                     method: 'POST',
-                    headers: headers,
-                    body: JSON.stringify({ beastQuery: selectedBeastId })
+                    headers,
+                    body: JSON.stringify({ beastQuery: randomBeast.cardId })
                 });
 
                 if (!selectRes.ok) {
                     throw new Error(`Failed to select beast - Status ${selectRes.status}`);
                 }
 
-                console.log(`[READY] [Battle #${battleId}] [${role}] ✓ Beast locked in`);
+                console.log(`[READY] [Battle #${battleId}] [${role}] ✓ Selected: ${randomBeast.name}`);
             } else {
-                throw new Error('No beasts found in defender deck');
+                throw new Error('No beasts available');
             }
         }
 
-        console.log(`[READY] [Battle #${battleId}] [${role}] Sending ready signal...`);
+        // Ready up
         const readyRes = await fetchWithTimeout(`${apiUrl}/ready`, {
             method: 'POST',
-            headers: headers,
+            headers,
             body: JSON.stringify({})
         });
 
@@ -445,25 +492,24 @@ async function startStrikeLoop(webUrl, role, battleId) {
     while (true) {
         try {
             if (Date.now() - strikeStartTime > MAX_BATTLE_DURATION) {
-                console.log(`[STRIKE] [Battle #${battleId}] [${role}] ⚠️  Max battle duration exceeded. Stopping.`);
+                console.log(`[STRIKE] [Battle #${battleId}] [${role}] ⚠️  Max duration exceeded. Stopping.`);
                 break;
             }
 
             const actionResponse = await fetchWithTimeout(`${apiUrl}/action`, {
                 method: 'POST',
-                headers: headers,
+                headers,
                 body: JSON.stringify({ action: 'strike' })
             });
 
             if (!actionResponse.ok) {
-                console.log(`[STRIKE] [Battle #${battleId}] [${role}] Server rejected strike (Status ${actionResponse.status})`);
+                console.log(`[STRIKE] [Battle #${battleId}] [${role}] Server rejected (Status ${actionResponse.status})`);
                 break;
             }
 
             const data = await actionResponse.json();
-
-            if (data.error || (data.status && data.status === 'error')) {
-                console.log(`[STRIKE] [Battle #${battleId}] [${role}] Battle ended: ${data.error || 'Game finished'}`);
+            if (data.error || data.status === 'error') {
+                console.log(`[STRIKE] [Battle #${battleId}] [${role}] Battle ended`);
                 break;
             }
 
@@ -479,12 +525,18 @@ async function startStrikeLoop(webUrl, role, battleId) {
     }
 
     const strikeDuration = ((Date.now() - strikeStartTime) / 1000).toFixed(1);
-    console.log(`[STRIKE] [Battle #${battleId}] [${role}] Loop ended after ${strikeCount} strikes (${strikeDuration}s)`);
+    console.log(`[STRIKE] [Battle #${battleId}] [${role}] Completed: ${strikeCount} strikes (${strikeDuration}s)`);
 }
 
 // ============================================
-// INITIALIZE BOTH CLIENTS
+// INITIALIZE
 // ============================================
-console.log('\n🚀 Starting Beast Battle Bot with DUAL ACCOUNTS...\n');
+console.log('\n🚀 Starting Beast Battle Bot - DUAL ACCOUNT\n');
+console.log('Setup:');
+console.log('  • Challenger (el): Sends challenges to group');
+console.log('  • Defender (Atsuomi): Receives defender link via DM');
+console.log('  • Both links paired automatically');
+console.log('  • Battle execution starts when both ready\n');
+
 clientChallenger.initialize();
 clientDefender.initialize();
