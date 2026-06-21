@@ -2,13 +2,13 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 
 // --- CONFIGURATION LISTS ---
-const OPPONENT_IDS = ['BM-KXU7QZ', 'BM-VB62DY'];
-const BEASTS = ['Sybil', 'Camazotz', 'Vlad'];
+const OPPONENT_IDS = ['BM-KXU7QZ'];
+const BEASTS = ['Sybil', 'Rune', 'Goliath'];
 
 // --- TIMEOUT SETTINGS ---
 const FETCH_TIMEOUT = 15000;
 const MAX_BATTLE_DURATION = 300000;
-const LINK_PAIR_TIMEOUT = 20000;
+const LINK_PAIR_TIMEOUT = 40000; // 40 seconds to allow defender link to arrive
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -33,7 +33,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT) {
 }
 
 // ============================================
-// CLIENT 1: CHALLENGER (el) - Sends challenges
+// CLIENT 1: CHALLENGER (el)
 // ============================================
 const clientChallenger = new Client({
     authStrategy: new LocalAuth({ clientId: 'challenger' }),
@@ -43,7 +43,7 @@ const clientChallenger = new Client({
 });
 
 // ============================================
-// CLIENT 2: DEFENDER (Atsuomi) - Receives defender links
+// CLIENT 2: DEFENDER (Atsuomi)
 // ============================================
 const clientDefender = new Client({
     authStrategy: new LocalAuth({ clientId: 'defender' }),
@@ -74,7 +74,6 @@ clientChallenger.on('ready', async () => {
     try {
         await sleep(3000);
         const chats = await clientChallenger.getChats();
-        // Finding the group works perfectly because getChats() returns Chat objects which do have .isGroup
         otakuGroup = chats.find(chat => chat.isGroup && chat.name === 'Phantom Troupe');
 
         if (otakuGroup) {
@@ -82,6 +81,7 @@ clientChallenger.on('ready', async () => {
             console.log(`\n🔧 SETUP:`);
             console.log(`   Opponents: ${OPPONENT_IDS.length} | Beasts: ${BEASTS.length}`);
             console.log(`   Total combos: ${OPPONENT_IDS.length * BEASTS.length}`);
+            console.log(`   Link pair timeout: ${LINK_PAIR_TIMEOUT / 1000}s`);
             console.log(`   ✓ CHALLENGER (el): Sending challenges & capturing challenger links`);
             console.log(`   ✓ DEFENDER (Atsuomi): Receiving defender links via DM\n`);
 
@@ -106,19 +106,16 @@ function getBattleIdFromUrl(url) {
  * CHALLENGER: Capture challenger link from group
  */
 clientChallenger.on('message', async (msg) => {
-    // FIXED: msg.from.endsWith('@g.us') is the correct way to identify a group message.
-    if (msg.from.endsWith('@g.us') && msg.body.includes('quizmd.online/battle/')) {
+    if (msg.isGroup && msg.body.includes('⚔️') && msg.body.includes('Challenger:') && msg.body.includes('https://quizmd.online/battle/')) {
 
-        // TARGETED REGEX: Extracts the challenger player link (contains /p/) 
-        // This completely bypasses any emojis or formatting in the bot's message.
-        const challengerMatch = msg.body.match(/(https:\/\/quizmd\.online\/battle\/[a-f0-9]+\/p\/[a-f0-9a-f]+)/i);
+        const challengerMatch = msg.body.match(/Challenger:\s*(https:\/\/quizmd\.online\/battle\/[^\s\n]+)/);
 
         if (challengerMatch && lastSentCombo && lastSentTime) {
             const challengerUrl = challengerMatch[1];
             const timeDiff = Date.now() - lastSentTime;
             const battleId = getBattleIdFromUrl(challengerUrl);
 
-            if (timeDiff > 20000) {
+            if (timeDiff > LINK_PAIR_TIMEOUT) {
                 console.log(`[WARNING] Challenger link arrived ${timeDiff}ms after challenge - might be stale, skipping`);
                 return;
             }
@@ -174,10 +171,9 @@ clientDefender.on('ready', async () => {
  * DEFENDER: Capture defender link from DM
  */
 clientDefender.on('message', async (msg) => {
-    // FIXED: Check if it is NOT a group (handles @c.us and @lid DM formats)
-    if (!msg.from.endsWith('@g.us') && msg.body.includes('quizmd.online/battle/')) {
+    if (!msg.isGroup && msg.body.includes('🛡️') && msg.body.includes('defender link') && msg.body.includes('https://quizmd.online/battle/')) {
 
-        const defenderMatch = msg.body.match(/https:\/\/quizmd\.online\/battle\/[^\s]+/);
+        const defenderMatch = msg.body.match(/https:\/\/quizmd\.online\/battle\/[^\s\n]+/);
 
         if (defenderMatch) {
             const defenderUrl = defenderMatch[0];
@@ -354,8 +350,7 @@ async function challengeLoop() {
 
             await otakuGroup.clearState();
 
-            // 6-second buffer to prevent loop overwriting the lastSentCombo variable before the bot responds.
-            await sleep(6000);
+            await sleep(3000);
 
         } catch (error) {
             console.error('[LOOP] Challenge loop error:', error.message);
