@@ -3,7 +3,7 @@ const qrcode = require('qrcode-terminal');
 
 // --- CONFIGURATION ---
 const OPPONENT_IDS = ['BM-KXU7QZ'];
-const BEASTS = ['Aurelian', 'Eclipse', 'Regulus'];
+const BEASTS = ['Kaiser', 'Ares', 'Rune', 'Helios'];
 
 // --- TIMEOUT SETTINGS ---
 const FETCH_TIMEOUT = 15000;
