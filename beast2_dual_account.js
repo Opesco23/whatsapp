@@ -3,7 +3,7 @@ const qrcode = require('qrcode-terminal');
 
 // --- CONFIGURATION ---
 const OPPONENT_IDS = ['BM-KXU7QZ'];
-const BEASTS = ['Spawn Goldmane', 'Fledgling Goldmane'];
+const BEASTS = ['Spawn Goldmane', 'weakling'];
 
 // --- TIMEOUT SETTINGS ---
 const FETCH_TIMEOUT = 15000;
