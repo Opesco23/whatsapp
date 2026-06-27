@@ -4,7 +4,7 @@ const qrcode = require('qrcode-terminal');
 // --- CONFIGURATION ---
 const OPPONENT_IDS = ['BM-KXU7QZ'];
 // const OPPONENT_IDS = ['BM-FWPUN7'];
-const BEASTS = ['abra', 'the'];
+const BEASTS = ['Eevee', 'Arceus'];
 // const BEASTS = ['PX-8', 'PX-9', 'PX-13', 'PX-14', 'Pup'];
 
 // --- TIMEOUT SETTINGS ---
